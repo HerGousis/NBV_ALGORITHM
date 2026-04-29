@@ -55,10 +55,10 @@ class ScanMonitor:
         try:
             xy = points[:, :2]
             z = points[:, 2]
-            ransac = RANSACRegressor(residual_threshold=0.015)
+            ransac = RANSACRegressor(residual_threshold=0.01)
             ransac.fit(xy, z)
             z_pred = ransac.predict(xy)
-            mask = z > (z_pred + 0.01)
+            mask = z > (z_pred + 0.02)
             return points[mask], colors[mask]
         except: return points, colors
 

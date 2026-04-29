@@ -18,6 +18,9 @@ object_folder = "object_files"
 save_folder = "scans"
 results_folder = "results"
 
+# 🔴 Error flag path
+error_flag_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "error_flag.npy")
+
 def setup_folders(folder):
     if os.path.exists(folder):
         for filename in os.listdir(folder):
@@ -38,8 +41,8 @@ setup_folders(save_folder)
 setup_folders(results_folder)
 
 # -------------------- 3. ΦΟΡΤΩΣΗ ΑΝΤΙΚΕΙΜΕΝΟΥ --------------------
-obj_path = os.path.join(object_folder, "3.obj")
-img_path = os.path.join(object_folder, "3.png")
+obj_path = os.path.join(object_folder, "demetra_200k.obj")
+img_path = os.path.join(object_folder, "demetra_200k.png")
 current_scale = [0.3, 0.3, 0.3]
 pos = [0, 0, 0.0]
 quat = p.getQuaternionFromEuler([math.radians(87), 0, 0])
@@ -65,7 +68,7 @@ except Exception as e:
     print(f"Texture Error: {e}")
 
 # -------------------- 4. CAMERA SETTINGS --------------------
-width, height = 1280, 720
+width, height = 1920, 1080
 fov = 60
 
 cam_x, cam_y, cam_z = 0.7, -0.7, 0.7
@@ -119,50 +122,77 @@ print(f"\nREADY. Saving Data to: /{save_folder} and Images to: /{results_folder}
 print("ARROWS: Rotate | WASD: Move | SPACE: Save Manually\n")
 
 # -------------------- 6. HELPER FUNCTION --------------------
-def capture_cross_sequence():
-    global frame_count, c_pos_np, forward_vec
+def capture_ellipse_sequence():
+    global frame_count, c_pos_np, forward_vec, results_folder, save_folder, fov, width, height
 
-    # offset για μικρές μετακινήσεις
-    offset = 0.1
+    a = 0.1
+    b = 0.05
+    num_points = 8
 
-    # Πίνακας μετατοπίσεων γύρω από το center
-    positions = [
-        c_pos_np + np.array([ offset, 0, 0]),  # +X
-        c_pos_np + np.array([-offset, 0, 0]),  # -X
-        c_pos_np + np.array([0,  0, offset]),  # +Y
-        c_pos_np + np.array([0,  0, -offset])   # -Y
-    ]
+    center_target = c_pos_np + forward_vec
 
-    # 1. SIDE CAPTURES (μόνο εικόνες)
-    for i, pos in enumerate(positions):
-        temp_target = pos + forward_vec
+    world_up = np.array([0, 0, 1])
+    right_vec = np.cross(forward_vec, world_up)
+    if np.linalg.norm(right_vec) < 1e-6:
+        right_vec = np.array([1, 0, 0])
+    else:
+        right_vec /= np.linalg.norm(right_vec)
+    up_vec = np.cross(right_vec, forward_vec)
+    up_vec /= np.linalg.norm(up_vec)
 
-        view_matrix = p.computeViewMatrix(pos.tolist(), temp_target.tolist(), [0,0,1])
-        projection_matrix = p.computeProjectionMatrixFOV(fov, width/height, 0.01, 10.0)
+    for i in range(num_points):
+        theta = (2 * np.pi * i) / num_points
+        offset = a * np.cos(theta) * right_vec + b * np.sin(theta) * up_vec
+        cam_pos = c_pos_np + offset
 
-        _, _, rgb_img, _, _ = p.getCameraImage(width, height, view_matrix, projection_matrix)
+        view_matrix = p.computeViewMatrix(cam_pos.tolist(), center_target.tolist(), [0, 0, 1])
+        projection_matrix = p.computeProjectionMatrixFOV(fov, width / height, 0.01, 10.0)
+
+        _, _, rgb_img, depth_img, _ = p.getCameraImage(
+            width, height, view_matrix, projection_matrix,
+            lightDirection=[1, 1, 1],
+            lightColor=[1, 1, 1],
+            lightDistance=5,
+            lightAmbientCoeff=0.3,
+            lightDiffuseCoeff=0.7,
+            lightSpecularCoeff=0.4,
+            shadow=1,
+            renderer=p.ER_BULLET_HARDWARE_OPENGL
+        )
+
         rgb_array = np.array(rgb_img).reshape(height, width, 4)[:, :, :3].astype(np.uint8)
+        Image.fromarray(rgb_array).save(
+            os.path.join(results_folder, f"image_{frame_count}_ellipse_{i}.png")
+        )
 
-        img_pil = Image.fromarray(rgb_array)
-        img_pil.save(os.path.join(results_folder, f"image_{frame_count}_side_{i}.png"))
         time.sleep(0.05)
 
-    # 2. BACK TO CENTER & FINAL CAPTURE
-    center_target = c_pos_np + forward_vec
-    view_matrix = p.computeViewMatrix(c_pos_np.tolist(), center_target.tolist(), [0,0,1])
-    projection_matrix = p.computeProjectionMatrixFOV(fov, width/height, 0.01, 10.0)
+    view_matrix = p.computeViewMatrix(c_pos_np.tolist(), center_target.tolist(), [0, 0, 1])
+    projection_matrix = p.computeProjectionMatrixFOV(fov, width / height, 0.01, 10.0)
 
-    _, _, rgb_img, depth_img, _ = p.getCameraImage(width, height, view_matrix, projection_matrix)
+    _, _, rgb_img, depth_img, _ = p.getCameraImage(
+        width, height, view_matrix, projection_matrix,
+        lightDirection=[1, 1, 1],
+        lightColor=[1, 1, 1],
+        lightDistance=5,
+        lightAmbientCoeff=0.3,
+        lightDiffuseCoeff=0.7,
+        lightSpecularCoeff=0.4,
+        shadow=1,
+        renderer=p.ER_BULLET_HARDWARE_OPENGL
+    )
+
     rgb_array = np.array(rgb_img).reshape(height, width, 4)[:, :, :3].astype(np.uint8)
     depth_buffer = np.array(depth_img).reshape(height, width)
-    real_depth = 10.0 * 0.01 / (10.0 - (10.0 - 0.01) * depth_buffer)
 
-    # save image
-    img_pil = Image.fromarray(rgb_array)
-    img_pil.save(os.path.join(results_folder, f"image_{frame_count}.png"))
+    near, far = 0.01, 10.0
+    real_depth = far * near / (far - (far - near) * depth_buffer)
 
-    # save scan
-    vm = np.array(view_matrix).reshape(4,4).T
+    Image.fromarray(rgb_array).save(
+        os.path.join(results_folder, f"image_{frame_count}.png")
+    )
+
+    vm = np.array(view_matrix).reshape(4, 4).T
     save_data = {
         'depth_map': real_depth,
         'rgb_map': rgb_array,
@@ -170,9 +200,10 @@ def capture_cross_sequence():
         'cam_rot_mat': vm[:3, :3].T,
         'full_view_matrix': np.array(view_matrix)
     }
+
     np.save(os.path.join(save_folder, f"scan_{frame_count}.npy"), save_data)
 
-    print(f"📸 Cross capture {frame_count} DONE (scan μόνο στο center)")
+    print(f"📸 Ellipse capture {frame_count} DONE")
     frame_count += 1
 
 # -------------------- 7. MAIN LOOP --------------------
@@ -180,6 +211,11 @@ while True:
     keys = p.getKeyboardEvents()
     moved = False
     auto_capture = False
+
+    # 🔴 CHECK ERROR FLAG -> AUTO RETAKE
+    if os.path.exists(error_flag_file):
+        print("⚠️ Error flag detected → Retaking scan")
+        auto_capture = True
 
     # ----------- AUTO CAMERA UPDATE -----------
     if os.path.exists(next_pose_file):
@@ -241,7 +277,7 @@ while True:
     # ----------- CAPTURE -----------
     if (keys.get(p.B3G_SPACE, 0) & p.KEY_WAS_TRIGGERED) or auto_capture:
         time.sleep(0.05)
-        capture_cross_sequence()
+        capture_ellipse_sequence()
 
     p.stepSimulation()
     time.sleep(1/240)

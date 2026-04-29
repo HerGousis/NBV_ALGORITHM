@@ -6,6 +6,13 @@ from sklearn.cluster import DBSCAN
 
 # -------------------- 1. ΥΠΟΛΟΓΙΣΤΙΚΕΣ ΣΥΝΑΡΤΗΣΕΙΣ (NBS) --------------------
 
+# --- ΠΡΟΣΘΗΚΗ: ΣΥΝΑΡΤΗΣΗ ΥΠΟΛΟΓΙΣΜΟΥ ΓΩΝΙΑΣ ---
+def calculate_angle(vector_a, vector_b):
+    unit_a = vector_a / (np.linalg.norm(vector_a) + 1e-6)
+    unit_b = vector_b / (np.linalg.norm(vector_b) + 1e-6)
+    dot_product = np.clip(np.dot(unit_a, unit_b), -1.0, 1.0)
+    return np.degrees(np.arccos(dot_product))
+
 def calculate_interest_score(points, radius=0.03):
     if len(points) == 0: return np.array([])
     nbrs = NearestNeighbors(radius=radius).fit(points)
@@ -23,6 +30,19 @@ def estimate_cluster_normal(cluster_points):
     if normal[2] < 0: normal = -normal
     return normal
 
+def get_oriented_normal(target_xyz, normal, curr_pos):
+    vec_to_robot = curr_pos - target_xyz
+    dist = np.linalg.norm(vec_to_robot)
+    if dist < 1e-6: return normal, -normal
+    
+    vec_to_robot /= dist
+    dot_product = np.dot(normal, vec_to_robot)
+    
+    if dot_product >= 0:
+        return normal, -normal
+    else:
+        return -normal, normal
+
 def is_occluded(target_xyz, camera_xyz, points, voxel_size):
     num_samples = 60
     line_points = np.linspace(target_xyz, camera_xyz, num_samples)
@@ -37,13 +57,6 @@ def calculate_efficiency_score(alignment, move_dist, cluster_priority):
     energy_cost = (move_dist * 0.3) + 0.05
     return benefit / (energy_cost + 0.1)
 
-def is_too_close_to_history(candidate_xyz, history, min_dist=0.18):
-    if not history: return False
-    for pose in history:
-        past_pos = np.array(pose['position'])
-        if np.linalg.norm(candidate_xyz - past_pos) < min_dist: return True
-    return False
-
 def find_best_candidate_view(target_info, points, voxel_size, d_s, curr_pos, camera_history=[]):
     target_xyz, normal, t_priority = target_info['center'], target_info['normal'], target_info['priority']
     best_camera_xyz, best_direction, max_score = None, None, -float('inf')
@@ -55,7 +68,7 @@ def find_best_candidate_view(target_info, points, voxel_size, d_s, curr_pos, cam
             direction = np.array([np.cos(phi), np.sin(phi), elev])
             direction /= np.linalg.norm(direction)
             camera_xyz = target_xyz + direction * d_s
-            if is_too_close_to_history(camera_xyz, camera_history, min_dist=0.15): continue
+            # if is_too_close_to_history... (παραλείπεται για συντομία)
             if is_occluded(target_xyz, camera_xyz, points, voxel_size): continue
             alignment = np.dot(-direction, z_surf)
             move_dist = np.linalg.norm(camera_xyz - curr_pos)
@@ -76,7 +89,11 @@ def find_prioritized_targets(points, scores, voxel_size, threshold=0.65):
         mask = (labels == label)
         cluster_pts = frontier_points[mask]
         avg_interest = np.mean(scores[frontier_indices][mask])
-        results.append({'center': np.mean(cluster_pts, axis=0), 'normal': estimate_cluster_normal(cluster_pts), 'priority': len(cluster_pts) * avg_interest})
+        results.append({
+            'center': np.mean(cluster_pts, axis=0), 
+            'normal': estimate_cluster_normal(cluster_pts), 
+            'priority': len(cluster_pts) * avg_interest
+        })
     if results:
         max_p = max(t['priority'] for t in results)
         for t in results: t['priority'] /= (max_p + 1e-6)
@@ -88,38 +105,25 @@ class PlanningMonitor:
     def __init__(self, folder="global_models"):
         self.folder = folder
         self.last_processed_id = -1
-        
-        # Δημιουργία του φακέλου αν δεν υπάρχει για αποφυγή σφαλμάτων
-        if not os.path.exists(self.folder):
-            os.makedirs(self.folder)
+        if not os.path.exists(self.folder): os.makedirs(self.folder)
 
-        self.plotter = pv.Plotter(title="NBS - Live Planning Monitor")
+        self.plotter = pv.Plotter(title="NBS - Angle & Normal Orientation")
         self.plotter.set_background("#111111")
-        self.plotter.add_axes()
-        
-        # Χρήση μεγάλου ακεραίου αντί για None στο max_steps για αποφυγή TypeError
         self.plotter.add_timer_event(max_steps=1000000, duration=500, callback=self.update)
-        
-        print(f"Watching folder: {self.folder} for new global models...")
-        self.update() # Πρώτος έλεγχος αμέσως
+        self.update()
 
     def get_latest_file(self):
         files = [f for f in os.listdir(self.folder) if f.startswith("global_model_") and f.endswith(".npy")]
         if not files: return None, -1
-        
         def get_id(name):
             try: return int(name.split('_')[-1].split('.')[0])
             except: return -1
-            
         latest_file = max(files, key=get_id)
         return os.path.join(self.folder, latest_file), get_id(latest_file)
 
     def update(self, *args):
         file_path, file_id = self.get_latest_file()
-        
-        # Φόρτωση μόνο αν βρεθεί νέο ID
         if file_id > self.last_processed_id:
-            print(f"🆕 New model detected: ID {file_id}. Processing...")
             self.last_processed_id = file_id
             self.run_planning(file_path)
 
@@ -129,71 +133,54 @@ class PlanningMonitor:
             points = data['points']
             metadata = data.get('metadata', {})
             voxel_size = metadata.get('voxel_size', 0.005)
-            camera_history = metadata.get('camera_history', [])
             last_pose = metadata.get('last_camera_pose', None)
+            curr_pos = np.array(last_pose['position']) if last_pose else np.array([0, 0, 0])
 
-            # NBS Logic
             interest_scores = calculate_interest_score(points, radius=voxel_size * 2.5)
             targets = find_prioritized_targets(points, interest_scores, voxel_size)
 
-            # Ανανέωση Plotter
             self.plotter.clear()
             self.plotter.add_axes()
-            self.plotter.add_text(f"Global Model ID: {self.last_processed_id}", 
-                                position='upper_left', font_size=10, color="white")
-
-            # Εμφάνιση Point Cloud
+            
             pc = pv.PolyData(points)
             pc["Interest"] = interest_scores
-            voxels = pc.glyph(geom=pv.Cube(x_length=voxel_size, y_length=voxel_size, z_length=voxel_size), scale=False)
-            self.plotter.add_mesh(voxels, scalars="Interest", cmap="turbo", opacity=0.3, name="cloud")
+            self.plotter.add_mesh(pc.glyph(geom=pv.Cube(x_length=voxel_size, y_length=voxel_size, z_length=voxel_size), scale=False), 
+                                  scalars="Interest", cmap="turbo", opacity=0.3, name="cloud")
 
-            # Θέση Ρομπότ
-            curr_pos = np.array(last_pose['position']) if last_pose else np.array([0, 0, 0])
             self.plotter.add_mesh(pv.Sphere(radius=0.015, center=curr_pos), color="cyan", name="robot")
 
-            # Εμφάνιση Ιστορικού Κάμερας (Γκρι Βέλη)
-            for i, pose in enumerate(camera_history):
-                p = pose['position']
-                rot = pose.get('rotation', np.eye(3))
-                d = rot @ np.array([0, 0, -1]) # Κατεύθυνση θέασης
-                self.plotter.add_mesh(pv.Arrow(start=p, direction=d, scale=0.03), color="gray", opacity=0.4)
-
-            # Επιλογή Βέλτιστου Στόχου
-            d_s, best_idx, max_eff, processed = 0.65, -1, -float('inf'), []
+            d_s, best_idx, max_eff, processed = 0.55, -1, -float('inf'), []
             for i, t in enumerate(targets):
-                cam_xyz, view_dir = find_best_candidate_view(t, points, voxel_size, d_s, curr_pos, camera_history)
-                t['camera'], t['view_dir'] = cam_xyz, view_dir
-                
-                if cam_xyz is not None:
-                    dist = np.linalg.norm(cam_xyz - curr_pos)
-                    # Υπολογισμός efficiency (alignment=1.0 για τον υπολογισμό προτεραιότητας)
-                    eff = calculate_efficiency_score(1.0, dist, t['priority'])
-                    if eff > max_eff:
-                        max_eff, best_idx = eff, i
+                cam_xyz, view_dir = find_best_candidate_view(t, points, voxel_size, d_s, curr_pos)
+                t['camera'] = cam_xyz
                 processed.append(t)
 
-            # Σχεδίαση Στόχων στην οθόνη
+            # --- ΠΡΟΣΘΗΚΗ: ΟΠΤΙΚΟΠΟΙΗΣΗ ΚΑΙ ΥΠΟΛΟΓΙΣΜΟΣ ΓΩΝΙΩΝ ---
             for i, t in enumerate(processed):
-                if t['camera'] is None: continue
-                color = "lime" if (i == best_idx) else "orange"
+                visible_norm, hidden_norm = get_oriented_normal(t['center'], t['normal'], curr_pos)
                 
-                # Γραμμή από τον στόχο στην προτεινόμενη θέση κάμερας
-                self.plotter.add_mesh(pv.Line(t['center'], t['camera']), color=color, line_width=3)
-                # Κώνος που δείχνει την κατεύθυνση θέασης
-                self.plotter.add_mesh(pv.Cone(center=t['camera'], direction=t['center'] - t['camera'], 
-                                              height=0.04, radius=0.015), color=color)
+                # Διάνυσμα προς το ρομπότ για τη γωνία
+                vec_to_robot = curr_pos - t['center']
                 
-                if i == best_idx:
-                    # Γραμμή κίνησης ρομπότ
-                    self.plotter.add_mesh(pv.Line(curr_pos, t['camera']), color="white", line_width=2)
-                    # Αποθήκευση για το επόμενο βήμα
-                    output = {"position": t['camera'], "view_direction": t['view_dir']}
-                    np.save("next_position.npy", output)
-                    print(f"🎯 Target updated! Next position saved for Model {self.last_processed_id}")
+                # Υπολογισμός γωνιών
+                angle_blue = calculate_angle(visible_norm, vec_to_robot)
+                angle_magenta = calculate_angle(hidden_norm, vec_to_robot)
+                
+                # Εκτύπωση στο console (μπορείς να το δεις στο terminal)
+                print(f"Target {i} | Blue Angle: {angle_blue:.1f}° | Magenta Angle: {angle_magenta:.1f}°")
+
+                # Σχεδίαση βελών
+                self.plotter.add_mesh(pv.Arrow(start=t['center'], direction=visible_norm, scale=0.06), 
+                                      color="blue", name=f"vis_norm_{i}")
+                self.plotter.add_mesh(pv.Arrow(start=t['center'], direction=hidden_norm, scale=0.04), 
+                                      color="magenta", opacity=0.5, name=f"hid_norm_{i}")
+
+                # Προσθήκη κειμένου πάνω από το cluster με τη γωνία
+                self.plotter.add_point_labels([t['center']], [f"{angle_blue:.0f}°"], 
+                                              font_size=10, point_color="blue", text_color="white", name=f"label_{i}")
 
         except Exception as e:
-            print(f"⚠️ Error in run_planning: {e}")
+            print(f"⚠️ Error: {e}")
 
     def show(self):
         self.plotter.show()
