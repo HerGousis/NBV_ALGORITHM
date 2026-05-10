@@ -89,3 +89,4 @@ python3 world_with_ur5_turntable.py
 <div style="text-align:center;">
     <img src="image/6.png" alt="3" width="800">
 </div>
+

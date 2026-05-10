@@ -238,7 +238,6 @@ while True:
                 print("📍 New position received!")
         except Exception as e:
             print(f"Error loading npy: {e}")
-            auto_capture = True
 
     # ----------- KEYBOARD -----------
     if keys.get(p.B3G_LEFT_ARROW, 0) & p.KEY_IS_DOWN: yaw -= sens; moved = True
